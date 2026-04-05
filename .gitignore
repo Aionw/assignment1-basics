@@ -160,4 +160,9 @@ cython_debug/
 #.idea/
 
 .ruff_cache/
-*.zip
+*.zip.claude
+.pytest_cache
+venv
+source/.cache
+source/build
+compile_commands.json

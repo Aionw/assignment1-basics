@@ -5,26 +5,34 @@
 #include "mmapped_file.h"
 #include "pcre2_regex.h"
 #include "pre_tokenizer.h"
+#include "thread_pool.h"
 
 namespace Tokenizer {
 
 class PreTokenizerTest : public ::testing::Test {
 protected:
-    void SetUp() override {}
-    void TearDown() override {}
+    void SetUp() override {
+        pool_ = std::make_unique<ThreadPool>(4);
+    }
+
+    void TearDown() override {
+        pool_.reset();
+    }
+
+    std::unique_ptr<ThreadPool> pool_;
 };
 
 TEST_F(PreTokenizerTest, Constructor) {
     const char* pattern = "'t|est";
     std::vector<std::string> tokens = {"<unk>", "<pad>"};
-    PreTokenizer tokenizer(pattern, tokens);
+    PreTokenizer tokenizer(*pool_, pattern, tokens);
     EXPECT_EQ(tokenizer.getSpecialTokens(), tokens);
 }
 
 TEST_F(PreTokenizerTest, EmptySpecialTokens) {
     const char* pattern = "test";
     std::vector<std::string> tokens;
-    PreTokenizer tokenizer(pattern, tokens);
+    PreTokenizer tokenizer(*pool_, pattern, tokens);
     EXPECT_TRUE(tokenizer.getSpecialTokens().empty());
 }
 
@@ -36,7 +44,7 @@ TEST_F(PreTokenizerTest, TokenizeSimpleText) {
 
     const char* pattern = "[a-zA-Z]+";
     std::vector<std::string> tokens;
-    PreTokenizer tokenizer(pattern, tokens);
+    PreTokenizer tokenizer(*pool_, pattern, tokens);
 
     MmappedFile file(tempFile, MmapAccess::read);
     ASSERT_TRUE(file.isOpen());
@@ -56,7 +64,7 @@ TEST_F(PreTokenizerTest, TokenizeWithSpecialTokens) {
 
     const char* pattern = "[a-z]+";
     std::vector<std::string> tokens = {"<|endoftext|>"};
-    PreTokenizer tokenizer(pattern, tokens);
+    PreTokenizer tokenizer(*pool_, pattern, tokens);
 
     MmappedFile file(tempFile, MmapAccess::read);
     ASSERT_TRUE(file.isOpen());
@@ -75,7 +83,7 @@ TEST_F(PreTokenizerTest, TokenizeEmptyFile) {
 
     const char* pattern = "[a-z]+";
     std::vector<std::string> tokens;
-    PreTokenizer tokenizer(pattern, tokens);
+    PreTokenizer tokenizer(*pool_, pattern, tokens);
 
     MmappedFile file(tempFile, MmapAccess::read);
     ASSERT_TRUE(file.isOpen());
@@ -94,7 +102,7 @@ TEST_F(PreTokenizerTest, TokenizeCounts) {
 
     const char* pattern = "[a-z]+";
     std::vector<std::string> tokens;
-    PreTokenizer tokenizer(pattern, tokens);
+    PreTokenizer tokenizer(*pool_, pattern, tokens);
 
     MmappedFile file(tempFile, MmapAccess::read);
     ASSERT_TRUE(file.isOpen());
@@ -117,7 +125,7 @@ TEST_F(PreTokenizerTest, TokenizeWithUnicode) {
 
     const char* pattern = "\\p{L}+|\\p{N}+";
     std::vector<std::string> tokens;
-    PreTokenizer tokenizer(pattern, tokens);
+    PreTokenizer tokenizer(*pool_, pattern, tokens);
 
     MmappedFile file(tempFile, MmapAccess::read);
     ASSERT_TRUE(file.isOpen());

@@ -21,15 +21,16 @@ namespace Tokenizer {
 
 class PreTokenizer {
 public:
-    PreTokenizer(const char* token_pattern, const std::vector<std::string>& special_tokens)
-        : re_(token_pattern), special_tokens_(special_tokens) {}
+    PreTokenizer(ThreadPool& pool, const char* token_pattern,
+                 const std::vector<std::string>& special_tokens)
+        : pool_(pool), re_(token_pattern), special_tokens_(special_tokens) {}
 
-    ylt::expected<absl::flat_hash_map<std::string_view, size_t>, std::string> tokenize(
-        MmappedFile& file);
+    ylt::expected<absl::flat_hash_map<std::string_view, size_t>, std::string> tokenize(MmappedFile& file);
 
     const std::vector<std::string>& getSpecialTokens() const { return special_tokens_; }
 
 private:
+    ThreadPool& pool_;
     Pcre2Regex re_;
     std::vector<std::string> special_tokens_{};
 };

@@ -1,4 +1,5 @@
 #include "pre_tokenizer.h"
+#include "thread_pool.h"
 #include "ylt/easylog.hpp"
 #include <CLI/CLI.hpp>
 #include <vector>
@@ -17,9 +18,10 @@ int main(int argc, char** argv) {
 
     CLI11_PARSE(app, argc, argv);
 
+    Tokenizer::ThreadPool pool(8);
     const char* pattern =
         "'(?:[sdmt]|ll|ve|re)| ?\\p{L}+| ?\\p{N}+| ?[^\\s\\p{L}\\p{N}]+|\\s+(?!\\S)|\\s+";
-    Tokenizer::PreTokenizer tokenizer(pattern, special_tokens);
+    Tokenizer::PreTokenizer tokenizer(pool, pattern, special_tokens);
     Tokenizer::MmappedFile mm_file{file_path, Tokenizer::MmapAccess::read};
     auto result = tokenizer.tokenize(mm_file);
 

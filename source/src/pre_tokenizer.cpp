@@ -1,5 +1,6 @@
 #include "pre_tokenizer.h"
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -63,15 +64,13 @@ namespace Tokenizer {
         return ylt::unexpected<std::string>(re_.error());
     }
 
+    // Split file by special tokens
     std::vector<std::string_view> input_items{file.data()};
     std::vector<std::string_view> output_items{};
-    if (special_tokens_.empty()) {
-        output_items = input_items;
-    } else {
+    if (!special_tokens_.empty()) {
         for (auto sep : special_tokens_) {
             for (auto item : input_items) {
                 std::vector<std::string_view> splitted = absl::StrSplit(item, sep);
-                output_items.reserve(splitted.size());
                 output_items.insert(output_items.end(), splitted.begin(), splitted.end());
             }
             input_items = output_items;
@@ -79,22 +78,58 @@ namespace Tokenizer {
         }
     }
 
+    // Distribute tokens to threads using min-heap based on total token size
+    size_t thread_count = pool_.threadCount();
+    std::vector<size_t> thread_loads(thread_count, 0);
+    std::vector<std::vector<std::string_view>> thread_items(thread_count);
+
+    // Min-heap: (total_size, thread_index)
+    std::vector<std::pair<size_t, size_t>> heap;
+    heap.reserve(thread_count);
+    for (size_t i = 0; i < thread_count; ++i) {
+        heap.emplace_back(0, i);
+    }
+    std::make_heap(heap.begin(), heap.end(), std::greater<>{});
+
+    // Assign each token to thread with smallest load
+    for (const auto& item : input_items) {
+        std::pop_heap(heap.begin(), heap.end(), std::greater<>{});
+        auto& [min_size, min_thread] = heap.back();
+        thread_items[min_thread].push_back(item);
+        min_size += item.size();
+        std::push_heap(heap.begin(), heap.end(), std::greater<>{});
+    }
+
+    // Submit tasks to thread pool
     absl::flat_hash_map<std::string_view, size_t> pre_tokens{};
     std::mutex pre_token_mu{};
-    for (int i = 0; i < output_items.size(); ++i) {
-        std::string_view item = output_items[i];
-        pool_.submit([this, &pre_token_mu, &pre_tokens, item] {
+    auto start = std::chrono::steady_clock::now();
+
+    for (size_t t = 0; t < thread_count; ++t) {
+        pool_.submit([this, &pre_token_mu, &pre_tokens, thread_items, t] {
+            auto find_start = std::chrono::steady_clock::now();
             absl::flat_hash_map<std::string_view, size_t> token_count{};
-            re_.findAll(item, [&token_count](std::string_view match) { token_count[match]++; });
+            for (const auto& item : thread_items[t]) {
+                re_.findAll(item, [&token_count](std::string_view match) { token_count[match]++; });
+            }
+            auto find_end = std::chrono::steady_clock::now();
+            auto find_us = std::chrono::duration_cast<std::chrono::microseconds>(find_end - find_start);
 
             std::lock_guard lk(pre_token_mu);
+            auto assign_start = std::chrono::steady_clock::now();
             for (auto [k, v] : token_count) {
                 pre_tokens[k] += v;
             }
+            auto assign_end = std::chrono::steady_clock::now();
+            auto assign_us = std::chrono::duration_cast<std::chrono::microseconds>(assign_end - assign_start);
+            ELOGFMT(WARN, "thread {}: findAll: {}us, assign: {}us, tokens: {}", t, find_us.count(), assign_us.count(), token_count.size());
         });
     }
-    // NOTE: using another cv to wait token is better
+
     pool_.wait();
+    auto end = std::chrono::steady_clock::now();
+    auto total_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+    ELOGFMT(WARN, "total tokenization: {}us", total_us.count());
     return {std::move(pre_tokens)};
 }
 

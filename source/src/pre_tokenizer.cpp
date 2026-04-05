@@ -10,14 +10,13 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
-#include "absl/container/flat_hash_map.h"
 #include "fmt/core.h"
 #include "fmt/format.h"
 #include "mmapped_file.h"
 #include "pcre2_regex.h"
-#include "thread_pool.h"
 #include "ylt/easylog.hpp"
 #include "ylt/util/expected.hpp"
 
@@ -57,8 +56,8 @@ namespace Tokenizer {
 //
 //    ELOGFMT(DEBUG, "read file content from: {} ok", file_path_.c_str());
 
-
- ylt::expected<absl::flat_hash_map<std::string_view, size_t>, std::string> PreTokenizer::tokenize(MmappedFile& file) {
+ylt::expected<absl::flat_hash_map<std::string_view, size_t>, std::string> PreTokenizer::tokenize(
+    MmappedFile& file) {
     if (!re_) {
         return ylt::unexpected<std::string>(re_.error());
     }
@@ -75,27 +74,16 @@ namespace Tokenizer {
                 output_items.insert(output_items.end(), splitted.begin(), splitted.end());
             }
             input_items = output_items;
-            output_items.clear();
         }
     }
 
-    absl::flat_hash_map<std::string_view, size_t> pre_tokens{};
-    std::mutex pre_token_mu{};
+    absl::flat_hash_map<std::string_view, size_t> token_count{};
     for (int i = 0; i < output_items.size(); ++i) {
         std::string_view item = output_items[i];
-        pool_.submit([this, &pre_token_mu, &pre_tokens, item] {
-            absl::flat_hash_map<std::string_view, size_t> token_count{};
-            re_.findAll(item, [&token_count](std::string_view match) { token_count[match]++; });
-
-            std::lock_guard lk(pre_token_mu);
-            for (auto [k, v] : token_count) {
-                pre_tokens[k] += v;
-            }
-        });
+        re_.findAll(item, [&token_count](std::string_view match) { token_count[match]++; });
     }
     // NOTE: using another cv to wait token is better
-    pool_.wait();
-    return {std::move(pre_tokens)};
+    return {std::move(token_count)};
 }
 
 }  // namespace Tokenizer

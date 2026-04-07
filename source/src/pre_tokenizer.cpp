@@ -11,9 +11,9 @@
 #include <string_view>
 #include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/strings/str_split.h"
 #include "absl/strings/string_view.h"
-#include "absl/container/flat_hash_map.h"
 #include "fmt/core.h"
 #include "fmt/format.h"
 #include "mmapped_file.h"
@@ -24,42 +24,32 @@
 
 namespace Tokenizer {
 
-//    // re2 regex usage
-//    RE2 whitespace_re("\\s+");
-//    if (!whitespace_re.ok()) {
-//        return ylt::unexpected<std::string>("failed to compile regex");
-//    }
-//
-//    std::string test_str = "hello   world";
-//    std::string normalized = test_str;
-//    RE2::GlobalReplace(&normalized, whitespace_re, " ");
-//    ELOGFMT(DEBUG, "normalized: {}", normalized);
-//
-//    // absl Status/StatusOr usage
-//    auto status = [](int64_t n) -> absl::StatusOr<int64_t> {
-//        if (n < 0) {
-//            return absl::InvalidArgumentError("negative not allowed");
-//        }
-//        return n * 2;
-//    };
-//
-//    auto result = status(42);
-//    if (result.ok()) {
-//        ELOGFMT(DEBUG, "status_or result: {}", *result);
-//    }
-//
-//    // absl Cleanup usage
-//    bool cleaned_up = false;
-//    {
-//        auto cleanup = absl::MakeCleanup([&cleaned_up]() { cleaned_up = true; });
-//        // cleanup runs when exiting this block
-//    }
-//    ELOGFMT(DEBUG, "cleanup fired: {}", cleaned_up ? "yes" : "no");
-//
-//    ELOGFMT(DEBUG, "read file content from: {} ok", file_path_.c_str());
+std::vector<std::vector<std::string_view>> distributeToThreads(
+    const std::vector<std::string_view>& items, size_t thread_count) {
+    std::vector<std::vector<std::string_view>> thread_items(thread_count);
 
+    // Min-heap: (total_size, thread_index)
+    std::vector<std::pair<size_t, size_t>> heap;
+    heap.reserve(thread_count);
+    for (size_t i = 0; i < thread_count; ++i) {
+        heap.emplace_back(0, i);
+    }
+    std::make_heap(heap.begin(), heap.end(), std::greater<>{});
 
- ylt::expected<absl::flat_hash_map<std::string_view, size_t>, std::string> PreTokenizer::tokenize(MmappedFile& file) {
+    // Assign each item to thread with smallest load
+    for (const auto& item : items) {
+        std::pop_heap(heap.begin(), heap.end(), std::greater<>{});
+        auto& [min_size, min_thread] = heap.back();
+        thread_items[min_thread].push_back(item);
+        min_size += item.size();
+        std::push_heap(heap.begin(), heap.end(), std::greater<>{});
+    }
+
+    return thread_items;
+}
+
+ylt::expected<absl::flat_hash_map<std::string_view, size_t>, std::string> PreTokenizer::tokenize(
+    MmappedFile& file) {
     if (!re_) {
         return ylt::unexpected<std::string>(re_.error());
     }
@@ -79,33 +69,15 @@ namespace Tokenizer {
     }
 
     // Distribute tokens to threads using min-heap based on total token size
-    size_t thread_count = pool_.threadCount();
-    std::vector<size_t> thread_loads(thread_count, 0);
-    std::vector<std::vector<std::string_view>> thread_items(thread_count);
-
-    // Min-heap: (total_size, thread_index)
-    std::vector<std::pair<size_t, size_t>> heap;
-    heap.reserve(thread_count);
-    for (size_t i = 0; i < thread_count; ++i) {
-        heap.emplace_back(0, i);
-    }
-    std::make_heap(heap.begin(), heap.end(), std::greater<>{});
-
-    // Assign each token to thread with smallest load
-    for (const auto& item : input_items) {
-        std::pop_heap(heap.begin(), heap.end(), std::greater<>{});
-        auto& [min_size, min_thread] = heap.back();
-        thread_items[min_thread].push_back(item);
-        min_size += item.size();
-        std::push_heap(heap.begin(), heap.end(), std::greater<>{});
-    }
+    std::vector<std::vector<std::string_view>> thread_items =
+        distributeToThreads(input_items, pool_.threadCount());
 
     // Submit tasks to thread pool
     absl::flat_hash_map<std::string_view, size_t> pre_tokens{};
     std::mutex pre_token_mu{};
     auto start = std::chrono::steady_clock::now();
 
-    for (size_t t = 0; t < thread_count; ++t) {
+    for (size_t t = 0; t < pool_.threadCount(); ++t) {
         pool_.submit([this, &pre_token_mu, &pre_tokens, thread_items, t] {
             auto find_start = std::chrono::steady_clock::now();
             absl::flat_hash_map<std::string_view, size_t> token_count{};
@@ -113,7 +85,8 @@ namespace Tokenizer {
                 re_.findAll(item, [&token_count](std::string_view match) { token_count[match]++; });
             }
             auto find_end = std::chrono::steady_clock::now();
-            auto find_us = std::chrono::duration_cast<std::chrono::microseconds>(find_end - find_start);
+            auto find_us =
+                std::chrono::duration_cast<std::chrono::microseconds>(find_end - find_start);
 
             std::lock_guard lk(pre_token_mu);
             auto assign_start = std::chrono::steady_clock::now();
@@ -121,8 +94,10 @@ namespace Tokenizer {
                 pre_tokens[k] += v;
             }
             auto assign_end = std::chrono::steady_clock::now();
-            auto assign_us = std::chrono::duration_cast<std::chrono::microseconds>(assign_end - assign_start);
-            ELOGFMT(WARN, "thread {}: findAll: {}us, assign: {}us, tokens: {}", t, find_us.count(), assign_us.count(), token_count.size());
+            auto assign_us =
+                std::chrono::duration_cast<std::chrono::microseconds>(assign_end - assign_start);
+            ELOGFMT(WARN, "thread {}: findAll: {}us, assign: {}us, tokens: {}", t, find_us.count(),
+                    assign_us.count(), token_count.size());
         });
     }
 

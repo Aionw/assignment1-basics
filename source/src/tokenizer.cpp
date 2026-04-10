@@ -11,6 +11,8 @@
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/cleanup/cleanup.h"
 #include "mmapped_file.h"
 #include "ylt/easylog.hpp"
 
@@ -31,62 +33,6 @@ std::vector<std::pair<WordItem, WordItem>> WordItems::pairs() const {
         out.emplace_back(items_[i], items_[i + 1]);
     }
     return out;
-}
-
-std::optional<size_t> WordItems::find(const WordItem& item) const {
-    for (size_t i = 0; i < items_.size(); ++i) {
-        if (items_[i] == item) {
-            return i;
-        }
-    }
-    return std::nullopt;
-}
-
-std::optional<size_t> WordItems::findPair(const WordItemPair& pair) const {
-    auto left_index = find(pair.first);
-    if (left_index && *left_index < items_.size() - 1 && items_[*left_index + 1] == pair.second) {
-        return left_index;
-    }
-    return std::nullopt;
-}
-
-std::pair<std::unique_ptr<WordItemPair>, std::unique_ptr<WordItemPair>> WordItems::siblingPair(
-    const WordItemPair& pair) const {
-    std::optional<size_t> left_index = findPair(pair);
-    if (!left_index) {
-        return {};
-    }
-
-    std::unique_ptr<WordItemPair> left_pair{};
-    std::unique_ptr<WordItemPair> right_pair{};
-    if (left_index.value() != 0) {
-        left_pair = std::make_unique<WordItemPair>(items_[left_index.value() - 1],
-                                                   items_[left_index.value()]);
-    }
-    size_t right_index = *left_index + 1;
-    if (right_index != items_.size() - 1) {
-        right_pair = std::make_unique<WordItemPair>(items_[right_index], items_[right_index + 1]);
-    }
-    return {std::move(left_pair), std::move(right_pair)};
-}
-
-std::pair<std::unique_ptr<WordItemPair>, std::unique_ptr<WordItemPair>> WordItems::siblingPair(
-    const WordItem& item) const {
-    std::optional<size_t> index = find(item);
-    if (!index) {
-        return {nullptr, nullptr};
-    }
-    std::unique_ptr<WordItemPair> left_pair{};
-    std::unique_ptr<WordItemPair> right_pair{};
-    if (index.value() != 0) {
-        left_pair =
-            std::make_unique<WordItemPair>(items_[index.value() - 1], items_[index.value()]);
-    }
-    if (index.value() != items_.size() - 1) {
-        right_pair =
-            std::make_unique<WordItemPair>(items_[index.value()], items_[index.value() + 1]);
-    }
-    return {std::move(left_pair), std::move(right_pair)};
 }
 
 void WordItems::merge(const WordItemPair& pair) {
@@ -116,6 +62,7 @@ BPETrainer::BPETrainer(size_t thread_count, const std::string& file_path,
 
 void BPETrainer::train() {
     using PairType = std::pair<WordItem, WordItem>;
+    auto start =  std::chrono::high_resolution_clock::now();
 
     auto pre_tokens = pre_tokenizer_.tokenize(file_);
     if (!pre_tokens.has_value()) {
@@ -127,42 +74,66 @@ void BPETrainer::train() {
     for (const auto& [k, _] : word_count) {
         word_items.emplace(k, k);
     }
+    absl::flat_hash_map<PairType, size_t, WordItemPairHash> pair_count{};
+    absl::flat_hash_map<PairType, absl::flat_hash_set<std::string_view>, WordItemPairHash> pair_to_word{};
+    for (const auto& [k, items] : word_items) {
+        for (const auto& p : items.pairs()) {
+            pair_count[p] += word_count[k];
+            pair_to_word[p].emplace(k);
+       }
+    }
 
     size_t vocab_capacity = vocab_size_ - pre_tokenizer_.getSpecialTokens().size() - 256;
     size_t total_merges = vocab_capacity;
     size_t current_merge = 0;
     size_t round{0};
     while (vocab_capacity != 0) {
-        absl::flat_hash_map<PairType, size_t, WordItemPairHash> pair_count{};
+
+        std::optional<PairType> max_pair{};
+        size_t max_count{0};
+
         for (const auto& [k, items] : word_items) {
             for (const auto& p : items.pairs()) {
-                pair_count[p] += word_count[k];
+                if(pair_count[p] > max_count) {
+                    max_count = pair_count[p];
+                    max_pair = p;
+                } else if(pair_count[p] == max_count) {
+                    if(p.first == max_pair->first && p.second.value() > max_pair->second.value()) {
+                        max_pair = p;
+                    } else if(p.first != max_pair->first && p.first.value() > max_pair->first.value()) {
+                        max_pair = p;
+                    }
+                }
             }
         }
+
         if (pair_count.empty()) {
             break;
         }
 
-        TopK<PairType, PairCountCompare> top_pairs(vocab_capacity,
-                                                   PairCountCompare{.pair_count = pair_count});
-        for (const auto& [p, _] : pair_count) {
-            top_pairs.push(p);
+        merges_.emplace_back(*max_pair);
+        const auto& max_pair_words = pair_to_word[*max_pair];
+        for(const auto& w : max_pair_words) {
+            auto& items = word_items.at(w);
+            size_t wc = word_count[w];
+            for(const auto& p :items.pairs()) {
+                pair_count[p] -= wc;
+                pair_to_word[p].erase(w);
+                if(pair_count[p] == 0) {
+                    pair_count.erase(p);
+                }
+            }
+            items.merge(*max_pair);
+            for(const auto& p :items.pairs()) {
+                pair_count[p] += wc;
+                pair_to_word[p].emplace(w);
+            }
         }
-
-        PairType top_pair = top_pairs.get()[0];
-        auto sort_pairs = top_pairs.get_sorted();
-        for (auto it = sort_pairs.rbegin(); it != sort_pairs.rend(); ++it) {
-            ELOGFMT(WARN, "R{} p({}:{}) count: {}", round, it->first.value(), it->second.value(),
-                    pair_count[*it]);
-        }
+        auto merge_end = std::chrono::high_resolution_clock::now();
         round++;
-        merges_.emplace_back(top_pair);
-
-        for (auto& [k, items] : word_items) {
-            items.merge(top_pair);
-        }
         vocab_capacity--;
     }
+    ELOGFMT(WARN, "total train time: {}us", std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - start).count());
 }
 
 absl::flat_hash_map<size_t, std::string> BPETrainer::vocab() const {

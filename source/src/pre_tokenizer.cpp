@@ -96,15 +96,13 @@ ylt::expected<absl::flat_hash_map<std::string_view, size_t>, std::string> PreTok
             auto assign_end = std::chrono::steady_clock::now();
             auto assign_us =
                 std::chrono::duration_cast<std::chrono::microseconds>(assign_end - assign_start);
-            ELOGFMT(WARN, "thread {}: findAll: {}us, assign: {}us, tokens: {}", t, find_us.count(),
-                    assign_us.count(), token_count.size());
         });
     }
 
     pool_.wait();
     auto end = std::chrono::steady_clock::now();
-    auto total_us = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-    ELOGFMT(WARN, "total tokenization: {}us", total_us.count());
+    auto total_us = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    ELOGFMT(WARN, "total tokenization: {}ms", total_us.count());
     return {std::move(pre_tokens)};
 }
 

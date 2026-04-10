@@ -180,15 +180,9 @@ public:
     std::vector<WordItemPair> pairs() const;
     const std::vector<WordItem>& items() const { return items_; }
 
-    std::pair<std::unique_ptr<WordItemPair>, std::unique_ptr<WordItemPair>> siblingPair(
-        const WordItemPair& pair) const;
-    std::pair<std::unique_ptr<WordItemPair>, std::unique_ptr<WordItemPair>> siblingPair(
-        const WordItem& item) const;
-    void merge(const WordItemPair& pair);
+   void merge(const WordItemPair& pair);
 
 private:
-    std::optional<size_t> find(const WordItem& item) const;
-    std::optional<size_t> findPair(const WordItemPair& pair) const;
 
     std::vector<WordItem> items_;
 };

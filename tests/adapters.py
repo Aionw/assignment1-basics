@@ -11,6 +11,7 @@ from torch import Tensor
 
 from cs336_basics.bpe import *
 
+
 def run_linear(
     d_in: int,
     d_out: int,
@@ -591,16 +592,16 @@ def run_train_bpe(
                 Merges are ordered by order of creation.
     """
     import sys
-    sys.path.insert(0, 'source/build')
+
+    sys.path.insert(0, "source/build")
     import ctokenizer
 
     trainer = ctokenizer.BPETrainer(8, str(input_path), special_tokens, vocab_size)
     trainer.train()
     return trainer.vocab(), trainer.merges()
     # vocab, merges = train_bpe(
-        # input_path=input_path,
-        # vocab_size=vocab_size,
-        # special_tokens=special_tokens,
+    # input_path=input_path,
+    # vocab_size=vocab_size,
+    # special_tokens=special_tokens,
     # )
     # return vocab, merges
- 

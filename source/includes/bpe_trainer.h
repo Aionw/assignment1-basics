@@ -70,10 +70,7 @@ public:
         : owned_(owned), data_(data), offset_(offset), size_(sz) {}
     WordItem(const char* data, size_t offset) : WordItem(data, offset, 1, false) {}
     ~WordItem() {
-        if (owned_) {
-            delete data_;
-            data_ = nullptr;
-        }
+        reset();
     }
 
     WordItem& operator=(const WordItem& other) {

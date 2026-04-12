@@ -1,9 +1,8 @@
-#include "tokenizer.h"
+#include "bpe_trainer.h"
 
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
-#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -13,10 +12,9 @@
 #include <utility>
 #include <vector>
 
-#include "absl/cleanup/cleanup.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
-#include "absl/container/internal/raw_hash_set.h"
+#include "absl/cleanup/cleanup.h"
 #include "mmapped_file.h"
 #include "ylt/easylog.hpp"
 
@@ -68,7 +66,7 @@ BPETrainer::BPETrainer(size_t thread_count, const std::string& file_path,
 
 void BPETrainer::train() {
     using PairType = std::pair<WordItem, WordItem>;
-    auto start = std::chrono::high_resolution_clock::now();
+    auto start =  std::chrono::high_resolution_clock::now();
 
     auto pre_tokens = pre_tokenizer_.tokenize(file_);
     if (!pre_tokens.has_value()) {
@@ -77,89 +75,111 @@ void BPETrainer::train() {
 
     absl::flat_hash_map<std::string_view, size_t> word_count = pre_tokens.value();
     absl::flat_hash_map<std::string_view, WordItems> word_items{};
-    std::vector<std::vector<std::string_view>> per_thread_keys{pool_.threadCount()};
-    size_t offset{0};
     for (const auto& [k, _] : word_count) {
         word_items.emplace(k, k);
-        per_thread_keys[offset++%pool_.threadCount()].emplace_back(k);
     }
     absl::flat_hash_map<PairType, size_t, WordItemPairHash> pair_count{};
-    absl::flat_hash_map<PairType, absl::flat_hash_set<std::string_view>, WordItemPairHash>
-        pair_to_word{};
+    absl::flat_hash_map<PairType, absl::flat_hash_set<std::string_view>, WordItemPairHash> pair_to_word{};
     for (const auto& [k, items] : word_items) {
         for (const auto& p : items.pairs()) {
             pair_count[p] += word_count[k];
             pair_to_word[p].emplace(k);
-        }
-    }
+       }
+    }        
+    ELOGFMT(WARN, "word count finished");
 
     size_t vocab_capacity = vocab_size_ - pre_tokenizer_.getSpecialTokens().size() - 256;
     size_t total_merges = vocab_capacity;
     size_t current_merge = 0;
     size_t round{0};
-    PairCountGreater greater{pair_count};
+
+    auto pair_is_larger = [&pair_count](const PairType& l, const PairType& r) -> bool {
+        if (l.first == r.first) {
+            return l.second.value() > r.second.value();
+        } else {
+            return l.first.value() > r.first.value();
+        }
+    };
+
+    auto larger = [&pair_count, &pair_is_larger](const PairType& l, const PairType& r) -> bool {
+        if (!pair_count.contains(l)) {
+            return false;
+        }
+        if (!pair_count.contains(r)) {
+            return true;
+        }
+        if (pair_count[l] > pair_count[r]) {
+            return true;
+        } else if (pair_count[l] == pair_count[r]) {
+            return pair_is_larger(l, r);
+        } else {
+            return false;
+        }
+    };
+    std::priority_queue<PairType, std::vector<PairType>, decltype(larger)> topk{larger};
+    auto add_topk = [&topk, &vocab_capacity](const PairType& p) {
+        if (topk.size() < vocab_capacity) {
+            topk.push(p);
+        } else {
+            topk.pop();
+            topk.push(p);
+        }
+    };
+    for (const auto& [p, _] : pair_count) {
+        add_topk(p);
+    }
     while (vocab_capacity != 0) {
         if (pair_count.empty()) {
             break;
         }
-        std::mutex mu{};
-        std::optional<PairType> max_pair{};
 
-        for (size_t i = 0; i < pool_.threadCount(); ++i) {
-            pool_.submit([&mu, &max_pair,&per_thread_keys, &word_items, &greater, ind = i] {
-                std::optional<PairType> local_max_pair{};
-                for (const auto& k : per_thread_keys[ind]) {
-                    for (const auto& p : word_items.at(k).pairs()) {
-                        if (!local_max_pair || greater(p, *local_max_pair)) {
-                            local_max_pair = p;
-                        }
-                    }
-                }
-                std::lock_guard lk(mu);
-                if (!max_pair || greater(*local_max_pair, *max_pair)) {
-                    max_pair = local_max_pair;
-                }
-            });
+        std::optional<PairType> max_pair{};
+        size_t max_count{0};
+        while (!topk.empty()) {
+            auto top = topk.top();
+            topk.pop();
+            if (pair_count.contains(top)) {
+                max_pair = top;
+                break;
+            }
         }
-        pool_.wait();
+        if(!max_pair){
+            for (const auto& [p, c] : pair_count) {
+                add_topk(p);
+            }
+        }
+        max_pair = topk.top();
+        topk.pop();
 
         merges_.emplace_back(*max_pair);
         const auto& max_pair_words = pair_to_word[*max_pair];
-        absl::flat_hash_set<PairType, WordItemPairHash> new_pair{};
-        for (const auto& w : max_pair_words) {
+        for(const auto& w : max_pair_words) {
             auto& items = word_items.at(w);
             size_t wc = word_count[w];
-            for (const auto& p : items.pairs()) {
+            for(const auto& p :items.pairs()) {
                 pair_count[p] -= wc;
                 pair_to_word[p].erase(w);
-                if (pair_count[p] == 0) {
+                if(pair_count[p] == 0) {
                     pair_count.erase(p);
                 }
             }
             items.merge(*max_pair);
-            for (const auto& p : items.pairs()) {
-                if(!pair_count.contains(p)) {
-                    new_pair.emplace(p);
-                }
+            for(const auto& p :items.pairs()) {
                 pair_count[p] += wc;
                 pair_to_word[p].emplace(w);
             }
         }
-        
         auto merge_end = std::chrono::high_resolution_clock::now();
         round++;
         vocab_capacity--;
+        ELOGFMT(WARN, "R{} finished", round);
     }
-    ELOGFMT(WARN, "total train time: {}us",
-            std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::high_resolution_clock::now() - start)
-                .count());
+    ELOGFMT(WARN, "total train time: {}us", std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::high_resolution_clock::now() - start).count());
 }
 
 absl::flat_hash_map<size_t, std::string> BPETrainer::vocab() const {
     absl::flat_hash_map<size_t, std::string> r{};
     size_t offset{0};
-    r.reserve(256 + pre_tokenizer_.getSpecialTokens().size() + merges_.size());
     for (const auto& t : pre_tokenizer_.getSpecialTokens()) {
         r[offset++] = std::string(t);
     }
@@ -174,7 +194,6 @@ absl::flat_hash_map<size_t, std::string> BPETrainer::vocab() const {
 
 std::vector<std::pair<std::string, std::string>> BPETrainer::merges() const {
     std::vector<std::pair<std::string, std::string>> r{};
-    r.reserve(merges_.size());
     for (const auto& m : merges_) {
         r.emplace_back(std::string(m.first.value()), std::string(m.second.value()));
     }

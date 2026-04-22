@@ -1,10 +1,8 @@
-cmake_minimum_required(VERSION 3.10)
-
-# Set Python and include path BEFORE project() so all targets see it
-set(Python_EXECUTABLE /opt/homebrew/bin/python3.13 CACHE FILEPATH "" FORCE)
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I/opt/homebrew/opt/python@3.13/Frameworks/Python.framework/Versions/3.13/include/python3.13")
-
+cmake_minimum_required(VERSION 3.15)
 project(MyProject)
+
+find_package(Python REQUIRED COMPONENTS Interpreter Development)
+find_package(nanobind REQUIRED)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -24,12 +22,7 @@ FetchContent_Declare(
 FetchContent_Declare(
   fmt
   GIT_REPOSITORY https://github.com/fmtlib/fmt.git
-  GIT_TAG 11.0.2
-)
-FetchContent_Declare(
-  nanobind
-  GIT_REPOSITORY https://github.com/wjakob/nanobind.git
-  GIT_TAG v2.12.0
+  GIT_TAG 11.1.2
 )
 FetchContent_Declare(
   abseil
@@ -46,7 +39,7 @@ FetchContent_Declare(
   GIT_REPOSITORY https://github.com/PhilipHazel/pcre2.git
   GIT_TAG pcre2-10.44
 )
-FetchContent_MakeAvailable(yalantinglibs cli11 fmt nanobind abseil googletest pcre2)
+FetchContent_MakeAvailable(yalantinglibs cli11 fmt abseil googletest pcre2)
 
 include_directories(${CMAKE_SOURCE_DIR}/includes)
 include_directories(${CMAKE_SOURCE_DIR}/build/_deps/yalantinglibs-src/include)
@@ -92,13 +85,15 @@ target_link_libraries(tokenizer
 nanobind_add_module(ctokenizer bindings/bindings.cpp)
 target_link_libraries(ctokenizer PRIVATE tokenizer)
 target_include_directories(ctokenizer PRIVATE ${CMAKE_SOURCE_DIR}/includes)
-target_include_directories(ctokenizer PRIVATE /opt/homebrew/opt/python@3.13/Frameworks/Python.framework/Versions/3.13/include/python3.13)
+target_include_directories(ctokenizer PRIVATE ${Python_INCLUDE_DIR})
 
-add_executable(tokenizer_test tests/tokenizer_test.cpp)
-target_link_libraries(tokenizer_test tokenizer pre_tokenizer mmapped_file pcre2_regex thread_pool GTest::gtest_main GTest::gtest yalantinglibs fmt absl::flat_hash_map absl::flat_hash_set absl::strings)
-add_test(NAME tokenizer_test COMMAND tokenizer_test)
+install(TARGETS ctokenizer LIBRARY DESTINATION cs336_basics)
 
-add_executable(myapp main.cpp)
-target_link_libraries(myapp pre_tokenizer CLI11 fmt)
+# add_executable(tokenizer_test tests/tokenizer_test.cpp)
+# target_link_libraries(tokenizer_test tokenizer pre_tokenizer mmapped_file pcre2_regex thread_pool GTest::gtest_main GTest::gtest yalantinglibs fmt absl::flat_hash_map absl::flat_hash_set absl::strings)
+# add_test(NAME tokenizer_test COMMAND tokenizer_test)
+
+# add_executable(myapp main.cpp)
+# target_link_libraries(myapp pre_tokenizer CLI11 fmt)
 
 enable_testing()

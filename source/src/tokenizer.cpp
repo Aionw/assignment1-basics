@@ -107,14 +107,11 @@ BPETrainer::BPETrainer(size_t thread_count, const std::string& file_path,
 void BPETrainer::train() {
     auto start = std::chrono::high_resolution_clock::now();
 
-    auto tokenize_start = std::chrono::high_resolution_clock::now();
     auto pre_tokens = pre_tokenizer_.tokenize(file_);
-    auto tokenize_end = std::chrono::high_resolution_clock::now();
     if (!pre_tokens.has_value()) {
         return;
     }
 
-    auto word_init_start = std::chrono::high_resolution_clock::now();
     absl::flat_hash_map<std::string_view, size_t> pretoken_counts = pre_tokens.value();
     std::vector<WordItems> word_items{};
     std::vector<size_t> word_counts{};
@@ -124,9 +121,7 @@ void BPETrainer::train() {
         word_items.emplace_back(word);
         word_counts.emplace_back(count);
     }
-    auto word_init_end = std::chrono::high_resolution_clock::now();
 
-    auto pair_init_start = std::chrono::high_resolution_clock::now();
     absl::flat_hash_map<PairType, size_t, WordItemPairHash> pair_count{};
     absl::flat_hash_map<PairType, absl::flat_hash_set<size_t>, WordItemPairHash>
         pair_to_word{};
@@ -145,16 +140,16 @@ void BPETrainer::train() {
             pair_to_word[p].emplace(word_id);
         });
     }
-    auto pair_init_end = std::chrono::high_resolution_clock::now();
 
-    auto heap_init_start = std::chrono::high_resolution_clock::now();
     size_t vocab_capacity = vocab_size_ - pre_tokenizer_.getSpecialTokens().size() - 256;
+    const size_t total_merges = vocab_capacity;
+    ELOGFMT(WARN, "bpe merges started: target_merges={} words={} initial_pairs={}", total_merges,
+            word_items.size(), pair_count.size());
     merges_.reserve(vocab_capacity);
     std::priority_queue<PairHeapEntry, std::vector<PairHeapEntry>, PairHeapLess> pair_heap{};
     for (const auto& [p, c] : pair_count) {
         pair_heap.push(PairHeapEntry{p, c});
     }
-    auto heap_init_end = std::chrono::high_resolution_clock::now();
 
     auto pushPairSnapshot = [&pair_count, &pair_heap](const PairType& p) {
         auto it = pair_count.find(p);
@@ -163,41 +158,26 @@ void BPETrainer::train() {
         }
     };
 
-    long long heap_pop_us{0};
-    long long update_us{0};
-    size_t stale_heap_entries{0};
-    size_t valid_heap_entries{0};
-    size_t affected_word_visits{0};
-    size_t touched_pair_visits{0};
-    size_t max_affected_words{0};
-    size_t max_touched_pairs{0};
-    auto merge_loop_start = std::chrono::high_resolution_clock::now();
+    const size_t progress_interval = std::max<size_t>(1, std::min<size_t>(1000, total_merges / 20));
+    auto merge_start = std::chrono::high_resolution_clock::now();
     while (vocab_capacity != 0) {
         if (pair_count.empty()) {
             break;
         }
         std::optional<PairType> max_pair{};
-        auto heap_pop_start = std::chrono::high_resolution_clock::now();
         while (!pair_heap.empty()) {
             auto top = pair_heap.top();
             pair_heap.pop();
             auto current = pair_count.find(top.pair);
             if (current != pair_count.end() && current->second == top.count) {
                 max_pair = std::move(top.pair);
-                valid_heap_entries++;
                 break;
             }
-            stale_heap_entries++;
         }
-        auto heap_pop_end = std::chrono::high_resolution_clock::now();
-        heap_pop_us +=
-            std::chrono::duration_cast<std::chrono::microseconds>(heap_pop_end - heap_pop_start)
-                .count();
         if (!max_pair) {
             break;
         }
 
-        auto update_start = std::chrono::high_resolution_clock::now();
         merges_.emplace_back(*max_pair);
         auto max_words_it = pair_to_word.find(*max_pair);
         if (max_words_it == pair_to_word.end()) {
@@ -206,8 +186,6 @@ void BPETrainer::train() {
         auto max_pair_words = std::move(max_words_it->second);
         pair_to_word.erase(max_words_it);
         absl::flat_hash_set<PairType, WordItemPairHash> touched_pairs{};
-        affected_word_visits += max_pair_words.size();
-        max_affected_words = std::max(max_affected_words, max_pair_words.size());
         for (const auto word_id : max_pair_words) {
             auto& items = word_items[word_id];
             size_t wc = word_counts[word_id];
@@ -238,33 +216,22 @@ void BPETrainer::train() {
         for (const auto& p : touched_pairs) {
             pushPairSnapshot(p);
         }
-        touched_pair_visits += touched_pairs.size();
-        max_touched_pairs = std::max(max_touched_pairs, touched_pairs.size());
-        auto update_end = std::chrono::high_resolution_clock::now();
-        update_us +=
-            std::chrono::duration_cast<std::chrono::microseconds>(update_end - update_start).count();
         
         vocab_capacity--;
+        if (merges_.size() == total_merges || merges_.size() % progress_interval == 0) {
+            auto now = std::chrono::high_resolution_clock::now();
+            auto elapsed_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - merge_start).count();
+            double percent = total_merges == 0
+                                 ? 100.0
+                                 : (static_cast<double>(merges_.size()) * 100.0 /
+                                    static_cast<double>(total_merges));
+            ELOGFMT(WARN,
+                    "bpe merge progress: {}/{} ({:.1f}%) elapsed={}ms active_pairs={} heap_size={}",
+                    merges_.size(), total_merges, percent, elapsed_ms, pair_count.size(),
+                    pair_heap.size());
+        }
     }
-    auto merge_loop_end = std::chrono::high_resolution_clock::now();
-    ELOGFMT(WARN,
-            "trainer profile: tokenize={}ms word_init={}ms pair_init={}ms heap_init={}ms "
-            "merge_loop={}ms heap_pop={}ms update={}ms merges={} words={} pairs={} "
-            "heap_valid={} heap_stale={} affected_words={} max_affected={} touched_pairs={} "
-            "max_touched={} heap_size_end={}",
-            std::chrono::duration_cast<std::chrono::milliseconds>(tokenize_end - tokenize_start)
-                .count(),
-            std::chrono::duration_cast<std::chrono::milliseconds>(word_init_end - word_init_start)
-                .count(),
-            std::chrono::duration_cast<std::chrono::milliseconds>(pair_init_end - pair_init_start)
-                .count(),
-            std::chrono::duration_cast<std::chrono::milliseconds>(heap_init_end - heap_init_start)
-                .count(),
-            std::chrono::duration_cast<std::chrono::milliseconds>(merge_loop_end - merge_loop_start)
-                .count(),
-            heap_pop_us / 1000, update_us / 1000, merges_.size(), word_items.size(),
-            pair_count.size(), valid_heap_entries, stale_heap_entries, affected_word_visits,
-            max_affected_words, touched_pair_visits, max_touched_pairs, pair_heap.size());
     ELOGFMT(WARN, "total train time: {}us",
             std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::high_resolution_clock::now() - start)

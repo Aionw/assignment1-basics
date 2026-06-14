@@ -194,6 +194,30 @@ public:
 
    void merge(const WordItemPair& pair);
 
+    template <typename NewPairFn>
+    void mergeAndVisitNewPairs(const WordItemPair& pair, NewPairFn&& new_pair_fn) {
+        if (items_.empty()) {
+            return;
+        }
+        std::vector<WordItem> items{};
+        items.reserve(items_.size());
+        size_t i = 0;
+        while (i < items_.size()) {
+            WordItem next{};
+            if (i + 1 < items_.size() && items_[i] == pair.first && items_[i + 1] == pair.second) {
+                next = items_[i] + items_[i + 1];
+                i += 2;
+            } else {
+                next = items_[i++];
+            }
+            if (!items.empty()) {
+                new_pair_fn(WordItemPair{items.back(), next});
+            }
+            items.emplace_back(std::move(next));
+        }
+        std::swap(items, items_);
+    }
+
 private:
 
     std::vector<WordItem> items_;

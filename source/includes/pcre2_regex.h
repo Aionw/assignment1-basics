@@ -30,6 +30,31 @@ public:
 
     std::vector<std::string_view> findAll(std::string_view text) const;
     void findAll(std::string_view text, const std::function<void(std::string_view)>& callback) const;
+    pcre2_match_data* createMatchData() const;
+    static void freeMatchData(pcre2_match_data* match_data);
+
+    template <typename Callback>
+    void findAll(std::string_view text, pcre2_match_data* match_data, Callback&& callback) const {
+        if (!code_ || match_data == nullptr) {
+            return;
+        }
+
+        PCRE2_SIZE subject_len = text.size();
+        PCRE2_SIZE offset = 0;
+
+        while (pcre2_match(code_.get(), (PCRE2_SPTR)text.data(), subject_len, offset, 0,
+                           match_data, nullptr) >= 0) {
+            PCRE2_SIZE* ovector = pcre2_get_ovector_pointer(match_data);
+            PCRE2_SIZE match_start = ovector[0];
+            PCRE2_SIZE match_end = ovector[1];
+            callback(text.substr(match_start, match_end - match_start));
+            if (match_end == offset) {
+                offset++;
+            } else {
+                offset = match_end;
+            }
+        }
+    }
 
     const char* error() const { return error_message_.c_str(); }
     int errorCode() const { return error_code_; }

@@ -60,27 +60,23 @@ std::vector<std::string_view> Pcre2Regex::findAll(std::string_view text) const {
 
 void Pcre2Regex::findAll(std::string_view text,
                          const std::function<void(std::string_view)>& callback) const {
+    pcre2_match_data* match_data = createMatchData();
+    if (match_data == nullptr) {
+        return;
+    }
+
+    findAll(text, match_data, callback);
+    freeMatchData(match_data);
+}
+
+pcre2_match_data* Pcre2Regex::createMatchData() const {
     if (!code_) {
-        return;
+        return nullptr;
     }
+    return pcre2_match_data_create_from_pattern(code_.get(), nullptr);
+}
 
-    pcre2_match_data* match_data = pcre2_match_data_create_from_pattern(code_.get(), nullptr);
-    if (!match_data) {
-        return;
-    }
-
-    PCRE2_SIZE subject_len = text.size();
-    PCRE2_SIZE offset = 0;
-
-    while (pcre2_match(code_.get(), (PCRE2_SPTR)text.data(), subject_len, offset,
-                       0, match_data, nullptr) >= 0) {
-        PCRE2_SIZE* ovector = pcre2_get_ovector_pointer(match_data);
-        PCRE2_SIZE match_start = ovector[0];
-        PCRE2_SIZE match_end = ovector[1];
-        callback(text.substr(match_start, match_end - match_start));
-        offset = match_end;
-    }
-
+void Pcre2Regex::freeMatchData(pcre2_match_data* match_data) {
     pcre2_match_data_free(match_data);
 }
 

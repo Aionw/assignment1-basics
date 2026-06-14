@@ -3,9 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
-#include <iterator>
 #include <memory>
-#include <mutex>
 #include <optional>
 #include <queue>
 #include <string>
@@ -16,13 +14,50 @@
 #include "absl/cleanup/cleanup.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
-#include "absl/container/internal/raw_hash_set.h"
 #include "mmapped_file.h"
 #include "ylt/easylog.hpp"
 
 namespace Tokenizer {
+namespace {
+
+using PairType = std::pair<WordItem, WordItem>;
+
+template <typename Fn>
+void forEachPair(const WordItems& word, Fn&& fn) {
+    const auto& items = word.items();
+    if (items.size() < 2) {
+        return;
+    }
+    for (size_t i = 0; i + 1 < items.size(); ++i) {
+        fn(PairType{items[i], items[i + 1]});
+    }
+}
+
+bool pairIsLarger(const PairType& l, const PairType& r) {
+    if (l.first == r.first) {
+        return l.second.value() > r.second.value();
+    }
+    return l.first.value() > r.first.value();
+}
+
+struct PairHeapEntry {
+    PairType pair;
+    size_t count;
+};
+
+struct PairHeapLess {
+    bool operator()(const PairHeapEntry& l, const PairHeapEntry& r) const {
+        if (l.count != r.count) {
+            return l.count < r.count;
+        }
+        return pairIsLarger(r.pair, l.pair);
+    }
+};
+
+}  // namespace
 
 WordItems::WordItems(std::string_view word) {
+    items_.reserve(word.size());
     for (int i = 0; i < word.size(); ++i) {
         items_.emplace_back(word.data(), i);
     }
@@ -33,6 +68,7 @@ std::vector<std::pair<WordItem, WordItem>> WordItems::pairs() const {
         return {};
     }
     std::vector<std::pair<WordItem, WordItem>> out{};
+    out.reserve(items_.size() - 1);
     for (int i = 0; i < items_.size() - 1; ++i) {
         out.emplace_back(items_[i], items_[i + 1]);
     }
@@ -44,6 +80,7 @@ void WordItems::merge(const WordItemPair& pair) {
         return;
     }
     std::vector<WordItem> items{};
+    items.reserve(items_.size());
     size_t i = 0;
     while (i < items_.size() - 1) {
         if (items_[i] == pair.first && items_[i + 1] == pair.second) {
@@ -67,7 +104,6 @@ BPETrainer::BPETrainer(size_t thread_count, const std::string& file_path,
       pre_tokenizer_(pool_, kGPT2Pattern.data(), special_tokens) {}
 
 void BPETrainer::train() {
-    using PairType = std::pair<WordItem, WordItem>;
     auto start = std::chrono::high_resolution_clock::now();
 
     auto pre_tokens = pre_tokenizer_.tokenize(file_);
@@ -77,77 +113,100 @@ void BPETrainer::train() {
 
     absl::flat_hash_map<std::string_view, size_t> word_count = pre_tokens.value();
     absl::flat_hash_map<std::string_view, WordItems> word_items{};
-    std::vector<std::vector<std::string_view>> per_thread_keys{pool_.threadCount()};
-    size_t offset{0};
+    word_items.reserve(word_count.size());
     for (const auto& [k, _] : word_count) {
         word_items.emplace(k, k);
-        per_thread_keys[offset++%pool_.threadCount()].emplace_back(k);
     }
     absl::flat_hash_map<PairType, size_t, WordItemPairHash> pair_count{};
     absl::flat_hash_map<PairType, absl::flat_hash_set<std::string_view>, WordItemPairHash>
         pair_to_word{};
+    size_t initial_pair_capacity{0};
+    for (const auto& [_, items] : word_items) {
+        if (items.items().size() > 1) {
+            initial_pair_capacity += items.items().size() - 1;
+        }
+    }
+    pair_count.reserve(initial_pair_capacity);
+    pair_to_word.reserve(initial_pair_capacity);
     for (const auto& [k, items] : word_items) {
-        for (const auto& p : items.pairs()) {
+        forEachPair(items, [&](const PairType& p) {
             pair_count[p] += word_count[k];
             pair_to_word[p].emplace(k);
-        }
+        });
     }
 
     size_t vocab_capacity = vocab_size_ - pre_tokenizer_.getSpecialTokens().size() - 256;
-    size_t total_merges = vocab_capacity;
-    size_t current_merge = 0;
-    size_t round{0};
-    PairCountGreater greater{pair_count};
+    merges_.reserve(vocab_capacity);
+    std::priority_queue<PairHeapEntry, std::vector<PairHeapEntry>, PairHeapLess> pair_heap{};
+    for (const auto& [p, c] : pair_count) {
+        pair_heap.push(PairHeapEntry{p, c});
+    }
+
+    auto pushPairSnapshot = [&pair_count, &pair_heap](const PairType& p) {
+        auto it = pair_count.find(p);
+        if (it != pair_count.end() && it->second > 0) {
+            pair_heap.push(PairHeapEntry{p, it->second});
+        }
+    };
+
     while (vocab_capacity != 0) {
         if (pair_count.empty()) {
             break;
         }
-        std::mutex mu{};
         std::optional<PairType> max_pair{};
-
-        for (size_t i = 0; i < pool_.threadCount(); ++i) {
-            pool_.submit([&mu, &max_pair,&per_thread_keys, &word_items, &greater, ind = i] {
-                std::optional<PairType> local_max_pair{};
-                for (const auto& k : per_thread_keys[ind]) {
-                    for (const auto& p : word_items.at(k).pairs()) {
-                        if (!local_max_pair || greater(p, *local_max_pair)) {
-                            local_max_pair = p;
-                        }
-                    }
-                }
-                std::lock_guard lk(mu);
-                if (!max_pair || greater(*local_max_pair, *max_pair)) {
-                    max_pair = local_max_pair;
-                }
-            });
+        while (!pair_heap.empty()) {
+            auto top = pair_heap.top();
+            pair_heap.pop();
+            auto current = pair_count.find(top.pair);
+            if (current != pair_count.end() && current->second == top.count) {
+                max_pair = std::move(top.pair);
+                break;
+            }
         }
-        pool_.wait();
+        if (!max_pair) {
+            break;
+        }
 
         merges_.emplace_back(*max_pair);
-        const auto& max_pair_words = pair_to_word[*max_pair];
-        absl::flat_hash_set<PairType, WordItemPairHash> new_pair{};
+        auto max_words_it = pair_to_word.find(*max_pair);
+        if (max_words_it == pair_to_word.end()) {
+            break;
+        }
+        auto max_pair_words = std::move(max_words_it->second);
+        pair_to_word.erase(max_words_it);
+        absl::flat_hash_set<PairType, WordItemPairHash> touched_pairs{};
         for (const auto& w : max_pair_words) {
             auto& items = word_items.at(w);
             size_t wc = word_count[w];
-            for (const auto& p : items.pairs()) {
-                pair_count[p] -= wc;
-                pair_to_word[p].erase(w);
-                if (pair_count[p] == 0) {
-                    pair_count.erase(p);
+            forEachPair(items, [&](const PairType& p) {
+                auto count_it = pair_count.find(p);
+                if (count_it == pair_count.end()) {
+                    return;
                 }
-            }
+                count_it->second -= wc;
+                auto words_it = pair_to_word.find(p);
+                if (words_it != pair_to_word.end()) {
+                    words_it->second.erase(w);
+                }
+                if (count_it->second == 0) {
+                    pair_count.erase(count_it);
+                    if (words_it != pair_to_word.end()) {
+                        pair_to_word.erase(words_it);
+                    }
+                }
+                touched_pairs.emplace(p);
+            });
             items.merge(*max_pair);
-            for (const auto& p : items.pairs()) {
-                if(!pair_count.contains(p)) {
-                    new_pair.emplace(p);
-                }
+            forEachPair(items, [&](const PairType& p) {
                 pair_count[p] += wc;
                 pair_to_word[p].emplace(w);
-            }
+                touched_pairs.emplace(p);
+            });
+        }
+        for (const auto& p : touched_pairs) {
+            pushPairSnapshot(p);
         }
         
-        auto merge_end = std::chrono::high_resolution_clock::now();
-        round++;
         vocab_capacity--;
     }
     ELOGFMT(WARN, "total train time: {}us",

@@ -66,18 +66,27 @@ public:
         data_ = data.release();
     }
     WordItem(const WordItem& other) { copy_from(other); }
+    WordItem(WordItem&& other) noexcept { move_from(std::move(other)); }
     WordItem(const char* data, size_t offset, size_t sz, bool owned)
         : owned_(owned), data_(data), offset_(offset), size_(sz) {}
     WordItem(const char* data, size_t offset) : WordItem(data, offset, 1, false) {}
     ~WordItem() {
-        if (owned_) {
-            delete data_;
-            data_ = nullptr;
-        }
+        reset();
     }
 
     WordItem& operator=(const WordItem& other) {
+        if (this == &other) {
+            return *this;
+        }
         copy_from(other);
+        return *this;
+    }
+
+    WordItem& operator=(WordItem&& other) noexcept {
+        if (this == &other) {
+            return *this;
+        }
+        move_from(std::move(other));
         return *this;
     }
 
@@ -120,7 +129,10 @@ public:
         data_ = other.data_;
         offset_ = other.offset_;
         size_ = other.size_;
-        other.reset();
+        other.owned_ = false;
+        other.data_ = nullptr;
+        other.offset_ = 0;
+        other.size_ = 0;
     }
 
 private:

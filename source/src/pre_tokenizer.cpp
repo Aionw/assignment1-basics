@@ -63,7 +63,7 @@ ylt::expected<absl::flat_hash_map<std::string_view, size_t>, std::string> PreTok
                 std::vector<std::string_view> splitted = absl::StrSplit(item, sep);
                 output_items.insert(output_items.end(), splitted.begin(), splitted.end());
             }
-            input_items = output_items;
+            input_items.swap(output_items);
             output_items.clear();
         }
     }
@@ -78,7 +78,7 @@ ylt::expected<absl::flat_hash_map<std::string_view, size_t>, std::string> PreTok
     auto start = std::chrono::steady_clock::now();
 
     for (size_t t = 0; t < pool_.threadCount(); ++t) {
-        pool_.submit([this, &pre_token_mu, &pre_tokens, thread_items, t] {
+        pool_.submit([this, &pre_token_mu, &pre_tokens, &thread_items, t] {
             auto find_start = std::chrono::steady_clock::now();
             absl::flat_hash_map<std::string_view, size_t> token_count{};
             for (const auto& item : thread_items[t]) {

@@ -14,6 +14,7 @@ from cs336_basics.linear import Linear
 from cs336_basics.embedding import Embedding
 from cs336_basics.rms_norm import RMSNorm
 
+
 def run_linear(
     d_in: int,
     d_out: int,
@@ -60,6 +61,11 @@ def run_embedding(
     return e.forward(token_ids)
 
 
+# TODO: this function should not be defined herer, put it in another place
+def silu(x: Tensor) -> Tensor:
+    return x * torch.sigmoid(x)
+
+
 def run_swiglu(
     d_model: int,
     d_ff: int,
@@ -89,7 +95,13 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    l1 = Linear(d_model, d_ff)
+    l1.load_state_dict({"weight": w1_weight})
+    gate = Linear(d_model, d_ff)
+    gate.load_state_dict({"weight": w3_weight})
+    l2 = Linear(d_ff, d_model)
+    l2.load_state_dict({"weight": w2_weight})
+    return l2.forward(silu(l1.forward(in_features)) * gate.forward(in_features))
 
 
 def run_scaled_dot_product_attention(

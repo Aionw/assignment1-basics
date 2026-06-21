@@ -6,8 +6,8 @@ from torch import Tensor
 class RoPE(nn.Module):
     def __init__(self, theta: float, d_k: int, max_seq_len: int, device=None) -> None:
         super().__init__()
-        thetas = 1 / (theta ** (torch.arange(0, d_k, 2) / d_k))
-        poss = torch.arange(0, max_seq_len)
+        thetas = 1 / (theta ** (torch.arange(0, d_k, 2, device=device) / d_k))
+        poss = torch.arange(0, max_seq_len, device=device)
         freqs = torch.outer(poss, thetas)
 
         cos = torch.cos(freqs)

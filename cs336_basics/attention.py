@@ -50,3 +50,31 @@ class MultiHeadeSelfAttention(nn.Module):
         atten = scaled_dot_product_attention(Q, K, V, mask)
         atten = atten.transpose(-2, -3).contiguous().view(x.shape)
         return self.wo(atten)
+
+
+class MultiHeadeSelfAttentionWithRoPE(nn.Module):
+    def __init__(self, d_model: int, num_heads: int, theta: float, max_seq_len: int, device=None) -> None:
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = d_model // num_heads
+        self.wq = Linear(d_model, d_model, device=device)
+        self.wk = Linear(d_model, d_model, device=device)
+        self.wv = Linear(d_model, d_model, device=device)
+        self.wo = Linear(self.head_dim * num_heads, d_model, device=device)
+        self.rope = RoPE(theta, self.head_dim, max_seq_len, device)
+
+    def forward(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+        seq_len = x.shape[-2]
+        # x: [..., seq_len, num_head, head_dim ]
+        Q = self.wq(x).unflatten(-1, (self.num_heads, self.head_dim))
+        K = self.wk(x).unflatten(-1, (self.num_heads, self.head_dim))
+        V = self.wv(x).unflatten(-1, (self.num_heads, self.head_dim))
+        # [..., num_head, seq_len, head_dim]
+        Q = self.rope(Q.transpose(-2, -3), positions)
+        K = self.rope(K.transpose(-2, -3), positions)
+        V = V.transpose(-2, -3)
+        # No masking
+        mask = torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool).tril()
+        atten = scaled_dot_product_attention(Q, K, V, mask)
+        atten = atten.transpose(-2, -3).contiguous().view(x.shape)
+        return self.wo(atten)

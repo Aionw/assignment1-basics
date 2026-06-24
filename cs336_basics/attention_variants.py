@@ -6,9 +6,10 @@ __all__ = [
     "MultiHeadLatentAttention",
     "PAPER_URLS",
     "causal_mask",
+    "compressed_sparse_attention",
     "deepseek_sparse_attention",
     "grouped_query_attention",
-    "native_sparse_attention",
+    "hybrid_cache_attention",
     "repeat_kv_heads",
     "selective_state_space_scan",
     "sliding_window_attention",
@@ -21,7 +22,8 @@ PAPER_URLS = {
     "mla": "https://arxiv.org/abs/2405.04434",
     "swa": "https://arxiv.org/abs/2310.06825",
     "dsa": "https://arxiv.org/abs/2512.02556",
-    "nsa": "https://arxiv.org/abs/2502.11089",
+    "csa": "https://huggingface.co/deepseek-ai/DeepSeek-V4",
+    "hca": "https://huggingface.co/deepseek-ai/DeepSeek-V4",
     "mamba": "https://arxiv.org/abs/2312.00752",
 }
 
@@ -56,16 +58,28 @@ def deepseek_sparse_attention(Q: Tensor, K: Tensor, V: Tensor, top_k: int, mask:
     raise NotImplementedError
 
 
-def native_sparse_attention(
+def compressed_sparse_attention(
     Q: Tensor,
     K: Tensor,
     V: Tensor,
-    compressed_block_indices: Tensor,
-    selected_token_indices: Tensor,
-    sliding_window_size: int,
+    compressed_keys: Tensor,
+    top_k: int,
     mask: Tensor | None = None,
 ) -> Tensor:
-    """Native Sparse Attention. Paper: https://arxiv.org/abs/2502.11089"""
+    """Compressed Sparse Attention. Paper: https://huggingface.co/deepseek-ai/DeepSeek-V4"""
+    raise NotImplementedError
+
+
+def hybrid_cache_attention(
+    Q: Tensor,
+    K: Tensor,
+    V: Tensor,
+    full_kv_cache: Tensor,
+    compressed_kv_cache: Tensor,
+    cache_budget: int,
+    mask: Tensor | None = None,
+) -> Tensor:
+    """Hybrid Cache Attention. Paper: https://huggingface.co/deepseek-ai/DeepSeek-V4"""
     raise NotImplementedError
 
 

@@ -16,7 +16,8 @@ def test_attention_variant_paper_urls_are_recorded():
         "mla": "https://arxiv.org/abs/2405.04434",
         "swa": "https://arxiv.org/abs/2310.06825",
         "dsa": "https://arxiv.org/abs/2512.02556",
-        "nsa": "https://arxiv.org/abs/2502.11089",
+        "csa": "https://huggingface.co/deepseek-ai/DeepSeek-V4",
+        "hca": "https://huggingface.co/deepseek-ai/DeepSeek-V4",
         "mamba": "https://arxiv.org/abs/2312.00752",
     }
 
@@ -26,9 +27,10 @@ def test_public_attention_variant_api_is_explicit():
         "MultiHeadLatentAttention",
         "PAPER_URLS",
         "causal_mask",
+        "compressed_sparse_attention",
         "deepseek_sparse_attention",
         "grouped_query_attention",
-        "native_sparse_attention",
+        "hybrid_cache_attention",
         "repeat_kv_heads",
         "selective_state_space_scan",
         "sliding_window_attention",
@@ -80,14 +82,25 @@ def test_dsa_function_signature():
     ]
 
 
-def test_nsa_function_signature():
-    assert list(inspect.signature(attention_variants.native_sparse_attention).parameters) == [
+def test_csa_function_signature():
+    assert list(inspect.signature(attention_variants.compressed_sparse_attention).parameters) == [
         "Q",
         "K",
         "V",
-        "compressed_block_indices",
-        "selected_token_indices",
-        "sliding_window_size",
+        "compressed_keys",
+        "top_k",
+        "mask",
+    ]
+
+
+def test_hca_function_signature():
+    assert list(inspect.signature(attention_variants.hybrid_cache_attention).parameters) == [
+        "Q",
+        "K",
+        "V",
+        "full_kv_cache",
+        "compressed_kv_cache",
+        "cache_budget",
         "mask",
     ]
 
@@ -180,39 +193,68 @@ def test_dsa_allows_top_k_larger_than_available_keys():
 
 
 @xfail_not_implemented
-def test_nsa_rejects_non_positive_sliding_window_size():
+def test_csa_rejects_non_positive_top_k():
     q = torch.randn(1, 2, 3, 4)
     k = torch.randn(1, 2, 3, 4)
     v = torch.randn(1, 2, 3, 4)
-    compressed_block_indices = torch.tensor([[[0]]])
-    selected_token_indices = torch.tensor([[[0]]])
+    compressed_keys = torch.randn(1, 2, 3, 4)
 
     with pytest.raises(ValueError):
-        attention_variants.native_sparse_attention(
+        attention_variants.compressed_sparse_attention(q, k, v, compressed_keys, top_k=0)
+
+
+@xfail_not_implemented
+def test_csa_allows_empty_compressed_keys():
+    q = torch.randn(1, 2, 3, 4)
+    k = torch.randn(1, 2, 3, 4)
+    v = torch.randn(1, 2, 3, 4)
+    compressed_keys = torch.empty(1, 2, 0, 4)
+
+    output = attention_variants.compressed_sparse_attention(
+        q,
+        k,
+        v,
+        compressed_keys,
+        top_k=1,
+    )
+
+    assert output.shape == q.shape
+
+
+@xfail_not_implemented
+def test_hca_rejects_negative_cache_budget():
+    q = torch.randn(1, 2, 3, 4)
+    k = torch.randn(1, 2, 3, 4)
+    v = torch.randn(1, 2, 3, 4)
+    full_kv_cache = torch.randn(1, 2, 3, 8)
+    compressed_kv_cache = torch.randn(1, 2, 2, 8)
+
+    with pytest.raises(ValueError):
+        attention_variants.hybrid_cache_attention(
             q,
             k,
             v,
-            compressed_block_indices,
-            selected_token_indices,
-            sliding_window_size=0,
+            full_kv_cache,
+            compressed_kv_cache,
+            cache_budget=-1,
         )
 
 
 @xfail_not_implemented
-def test_nsa_handles_empty_sparse_indices_with_local_window():
+def test_hca_allows_zero_full_cache_budget_with_compressed_cache():
     q = torch.randn(1, 2, 3, 4)
     k = torch.randn(1, 2, 3, 4)
     v = torch.randn(1, 2, 3, 4)
-    compressed_block_indices = torch.empty(1, 2, 0, dtype=torch.long)
-    selected_token_indices = torch.empty(1, 2, 0, dtype=torch.long)
+    full_kv_cache = torch.empty(1, 2, 0, 8)
+    compressed_kv_cache = torch.randn(1, 2, 2, 8)
 
-    output = attention_variants.native_sparse_attention(
+    output = attention_variants.hybrid_cache_attention(
         q,
         k,
         v,
-        compressed_block_indices,
-        selected_token_indices,
-        sliding_window_size=1,
+        full_kv_cache,
+        compressed_kv_cache,
+        cache_budget=0,
     )
 
     assert output.shape == q.shape

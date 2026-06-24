@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from torch import Tensor
+from torch.nn.functional import silu
 
 
 class Linear(nn.Module):
@@ -22,3 +23,18 @@ class Linear(nn.Module):
 
     def forward(self, x: Tensor) -> Tensor:
         return x @ self.weight.T
+
+
+def sliu(x: torch.Tensor) -> torch.Tensor:
+    return x * torch.sigmoid(x)
+
+
+class SwiGLUFFN(nn.Module):
+    def __init__(self, d_model: int, d_ff: int, device=None) -> None:
+        super().__init__()
+        self.l1 = Linear(d_model, d_ff)
+        self.gate = Linear(d_model, d_ff)
+        self.l2 = Linear(d_ff, d_model)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.l2(silu(self.l1(x)) * self.gate(x))

@@ -63,18 +63,17 @@ class MultiHeadeSelfAttentionWithRoPE(nn.Module):
         self.wo = Linear(self.head_dim * num_heads, d_model, device=device)
         self.rope = RoPE(theta, self.head_dim, max_seq_len, device)
 
-    def forward(self, x: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, positions: torch.Tensor | None = None) -> torch.Tensor:
         seq_len = x.shape[-2]
-        # x: [..., seq_len, num_head, head_dim ]
-        Q = self.wq(x).unflatten(-1, (self.num_heads, self.head_dim))
-        K = self.wk(x).unflatten(-1, (self.num_heads, self.head_dim))
-        V = self.wv(x).unflatten(-1, (self.num_heads, self.head_dim))
+        Q = self.wq(x).unflatten(-1, (self.num_heads, self.head_dim)).transpose(-2, -3)
+        K = self.wk(x).unflatten(-1, (self.num_heads, self.head_dim)).transpose(-2, -3)
+        V = self.wv(x).unflatten(-1, (self.num_heads, self.head_dim)).transpose(-2, -3)
         # [..., num_head, seq_len, head_dim]
-        Q = self.rope(Q.transpose(-2, -3), positions)
-        K = self.rope(K.transpose(-2, -3), positions)
-        V = V.transpose(-2, -3)
-        # No masking
+        pos = positions if positions is not None else torch.arange(seq_len)
+        Q = self.rope(Q, pos)
+        K = self.rope(K, pos)
         mask = torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool).tril()
+        # No masking
         atten = scaled_dot_product_attention(Q, K, V, mask)
         atten = atten.transpose(-2, -3).contiguous().view(x.shape)
         return self.wo(atten)

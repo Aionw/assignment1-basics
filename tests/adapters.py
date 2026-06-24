@@ -8,14 +8,16 @@ from numpy import ma
 import numpy.typing as npt
 import torch
 from jaxtyping import Bool, Float, Int
-from torch import Tensor
+from torch import Tensor, device
 
+from cs336_basics import transformer
 from cs336_basics.tokenizer import Tokenizer
-from cs336_basics.linear import Linear
+from cs336_basics.linear import Linear, SwiGLUFFN
 from cs336_basics.embedding import Embedding
 from cs336_basics.rms_norm import RMSNorm
 from cs336_basics.rope import RoPE
 from cs336_basics.func import softmax
+from cs336_basics.transformer import Transformer
 from cs336_basics.attention import (
     scaled_dot_product_attention,
     MultiHeadeSelfAttention,
@@ -69,11 +71,6 @@ def run_embedding(
     return e.forward(token_ids)
 
 
-# TODO: this function should not be defined herer, put it in another place
-def silu(x: Tensor) -> Tensor:
-    return x * torch.sigmoid(x)
-
-
 def run_swiglu(
     d_model: int,
     d_ff: int,
@@ -103,13 +100,16 @@ def run_swiglu(
     # swiglu.w1.weight.data = w1_weight
     # swiglu.w2.weight.data = w2_weight
     # swiglu.w3.weight.data = w3_weight
-    l1 = Linear(d_model, d_ff)
-    l1.load_state_dict({"weight": w1_weight})
-    gate = Linear(d_model, d_ff)
-    gate.load_state_dict({"weight": w3_weight})
-    l2 = Linear(d_ff, d_model)
-    l2.load_state_dict({"weight": w2_weight})
-    return l2.forward(silu(l1.forward(in_features)) * gate.forward(in_features))
+
+    ffn = SwiGLUFFN(d_model, d_ff, device=in_features.device)
+    ffn.load_state_dict(
+        {
+            "l1.weight": w1_weight,
+            "gate.weight": w3_weight,
+            "l2.weight": w2_weight,
+        }
+    )
+    return ffn(in_features)
 
 
 def run_scaled_dot_product_attention(
@@ -308,7 +308,21 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    xformer = Transformer(d_model, num_heads, d_ff, max_seq_len, theta, device=in_features.device)
+    xformer.load_state_dict(
+        {
+            "pre_atten_norm._weight": weights["ln1.weight"],
+            "attn.wq.weight": weights["attn.q_proj.weight"],
+            "attn.wk.weight": weights["attn.k_proj.weight"],
+            "attn.wv.weight": weights["attn.v_proj.weight"],
+            "attn.wo.weight": weights["attn.output_proj.weight"],
+            "ffn.l1.weight": weights["ffn.w1.weight"],
+            "ffn.gate.weight": weights["ffn.w3.weight"],
+            "ffn.l2.weight": weights["ffn.w2.weight"],
+            "pre_ffn_norm._weight": weights["ln2.weight"],
+        }
+    )
+    return xformer(in_features)
 
 
 def run_transformer_lm(
@@ -390,7 +404,38 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    embedding = Embedding(vocab_size, d_model, device=in_indices.device)
+    layers = torch.nn.ModuleList(
+        [
+            Transformer(d_model, num_heads, d_ff, context_length, rope_theta, device=in_indices.device)
+            for _ in range(num_layers)
+        ]
+    )
+    ln_final = RMSNorm(d_model, device=in_indices.device)
+    lm_head = Linear(d_model, vocab_size, device=in_indices.device)
+
+    embedding.load_state_dict({"weight": weights["token_embeddings.weight"]})
+    for i, layer in enumerate(layers):
+        layer.load_state_dict(
+            {
+                "pre_atten_norm._weight": weights[f"layers.{i}.ln1.weight"],
+                "attn.wq.weight": weights[f"layers.{i}.attn.q_proj.weight"],
+                "attn.wk.weight": weights[f"layers.{i}.attn.k_proj.weight"],
+                "attn.wv.weight": weights[f"layers.{i}.attn.v_proj.weight"],
+                "attn.wo.weight": weights[f"layers.{i}.attn.output_proj.weight"],
+                "ffn.l1.weight": weights[f"layers.{i}.ffn.w1.weight"],
+                "ffn.gate.weight": weights[f"layers.{i}.ffn.w3.weight"],
+                "ffn.l2.weight": weights[f"layers.{i}.ffn.w2.weight"],
+                "pre_ffn_norm._weight": weights[f"layers.{i}.ln2.weight"],
+            }
+        )
+    ln_final.load_state_dict({"_weight": weights["ln_final.weight"]})
+    lm_head.load_state_dict({"weight": weights["lm_head.weight"]})
+
+    x = embedding(in_indices)
+    for layer in layers:
+        x = layer(x)
+    return lm_head(ln_final(x))
 
 
 def run_rmsnorm(

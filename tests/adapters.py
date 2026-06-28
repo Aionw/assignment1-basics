@@ -23,6 +23,7 @@ from cs336_basics.attention import (
     MultiHeadeSelfAttention,
     MultiHeadeSelfAttentionWithRoPE,
 )
+from cs336_basics.adamw import AdamW
 
 
 def run_linear(
@@ -550,7 +551,7 @@ def get_adamw_cls() -> Any:
     """
     Returns a torch.optim.Optimizer that implements AdamW.
     """
-    raise NotImplementedError
+    return AdamW
 
 
 def run_get_lr_cosine_schedule(

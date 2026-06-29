@@ -26,8 +26,8 @@ class AdamW(torch.optim.Optimizer):
                 g = p.grad.data  # NOTE: g is a tensor
                 lr = state.get("lr", lr)
                 t = state.get("t", 1)  # Get iteration number from the state, or 1.
-                m = state.get("m", 0)
-                v = state.get("v", 0)
+                m = state.get("m", torch.zeros_like(p))
+                v = state.get("v", torch.zeros_like(p))
                 lr_t = lr * math.sqrt(1 - beta2**t) / (1 - beta1**t)
                 m = beta1 * m + (1 - beta1) * g
                 v = beta2 * v + (1 - beta2) * (g**2)

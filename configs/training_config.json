@@ -7,5 +7,7 @@
   "checkpoint_every": 1000,
   "data_dtype": "uint16",
   "device": "cuda",
-  "seed": 1337
+  "seed": 1337,
+  "compile": true,
+  "precision": "bf16"
 }

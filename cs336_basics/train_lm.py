@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,8 @@ def parse_args() -> argparse.Namespace:
         "checkpoint_every": 1000,
         "device": "cuda" if torch.cuda.is_available() else "cpu",
         "seed": 1337,
+        "compile": True,
+        "precision": "bf16",
     }
 
     config_parser = argparse.ArgumentParser(add_help=False)
@@ -90,6 +93,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--device")
     parser.add_argument("--seed", type=int)
+    parser.add_argument("--precision", choices=("fp32", "bf16", "fp16"))
+    parser.add_argument("--compile", dest="compile", action="store_true", help="Compile the model with torch.compile.")
+    parser.add_argument("--no-compile", dest="compile", action="store_false", help="Disable torch.compile.")
     parser.add_argument("--tensorboard-log-dir", type=Path, help="If set, write metrics for TensorBoard.")
 
     args = parser.parse_args(remaining_args)
@@ -138,6 +144,8 @@ def load_config_defaults(config_args: argparse.Namespace) -> dict[str, Any]:
             "data_dtype",
             "device",
             "seed",
+            "compile",
+            "precision",
         },
     }
     defaults = {}
@@ -172,8 +180,30 @@ def set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
                 optimizer.state[param]["lr"] = lr
 
 
-def batch_loss(model: torch.nn.Module, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    logits = model(x)
+def get_amp_dtype(precision: str) -> torch.dtype | None:
+    if precision == "fp32":
+        return None
+    if precision == "bf16":
+        return torch.bfloat16
+    if precision == "fp16":
+        return torch.float16
+    raise ValueError(f"unsupported precision: {precision}")
+
+
+def should_use_amp(device: str, precision: str) -> bool:
+    return device.startswith("cuda") and precision != "fp32"
+
+
+def batch_loss(
+    model: torch.nn.Module,
+    x: torch.Tensor,
+    y: torch.Tensor,
+    amp_enabled: bool,
+    amp_dtype: torch.dtype | None,
+) -> torch.Tensor:
+    context = torch.autocast(device_type="cuda", dtype=amp_dtype) if amp_enabled else nullcontext()
+    with context:
+        logits = model(x)
     return cross_entropy(logits.reshape(-1, logits.shape[-1]), y.reshape(-1))
 
 
@@ -185,12 +215,15 @@ def estimate_loss(
     context_length: int,
     device: str,
     eval_iters: int,
+    precision: str,
 ) -> float:
     model.eval()
     losses = []
+    amp_enabled = should_use_amp(device, precision)
+    amp_dtype = get_amp_dtype(precision)
     for _ in range(eval_iters):
         x, y = get_batch(dataset, batch_size, context_length, device)
-        losses.append(batch_loss(model, x.long(), y.long()).item())
+        losses.append(batch_loss(model, x.long(), y.long(), amp_enabled, amp_dtype).item())
     model.train()
     return float(sum(losses) / len(losses))
 
@@ -215,7 +248,7 @@ def main() -> None:
     if valid_data is not None and len(valid_data) <= args.context_length:
         raise ValueError("validation data must be longer than --context-length")
 
-    model = TransformerLM(
+    raw_model = TransformerLM(
         vocab_size=args.vocab_size,
         context_length=args.context_length,
         d_model=args.d_model,
@@ -226,7 +259,7 @@ def main() -> None:
         device=args.device,
     )
     optimizer = AdamW(
-        model.parameters(),
+        raw_model.parameters(),
         lr=args.lr,
         weight_decay=args.weight_decay,
         betas=(args.beta1, args.beta2),
@@ -235,11 +268,19 @@ def main() -> None:
 
     start_iter = 0
     if args.resume_from:
-        start_iter = load_checkpoint(args.resume_from, model, optimizer)
+        start_iter = load_checkpoint(args.resume_from, raw_model, optimizer)
         print(f"resumed checkpoint from {args.resume_from} at iteration {start_iter}")
+
+    model = torch.compile(raw_model) if args.compile else raw_model
+    if args.compile:
+        print("compiled model with torch.compile", flush=True)
 
     writer = maybe_init_tensorboard(args.tensorboard_log_dir)
     cosine_cycle_iters = args.cosine_cycle_iters or args.num_iters
+    amp_enabled = should_use_amp(args.device, args.precision)
+    amp_dtype = get_amp_dtype(args.precision)
+    scaler = torch.amp.GradScaler("cuda", enabled=args.device.startswith("cuda") and args.precision == "fp16")
+    print(f"training precision={args.precision}", flush=True)
 
     model.train()
     for iteration in range(start_iter, args.num_iters):
@@ -247,20 +288,23 @@ def main() -> None:
         set_optimizer_lr(optimizer, lr)
 
         x, y = get_batch(train_data, args.batch_size, args.context_length, args.device)
-        loss = batch_loss(model, x.long(), y.long())
+        loss = batch_loss(model, x.long(), y.long(), amp_enabled, amp_dtype)
 
         optimizer.zero_grad()
-        loss.backward()
+        scaler.scale(loss).backward()
+        if scaler.is_enabled():
+            scaler.unscale_(optimizer)
         if args.grad_clip > 0:
             gradient_clipping(model.parameters(), args.grad_clip)
-        optimizer.step()
+        scaler.step(optimizer)
+        scaler.update()
 
         step = iteration + 1
         metrics = {"train/loss": loss.item(), "train/perplexity": math.exp(min(loss.item(), 20)), "lr": lr}
 
         if step % args.eval_every == 0 and valid_data is not None:
             valid_loss = estimate_loss(
-                model, valid_data, args.batch_size, args.context_length, args.device, args.eval_iters
+                model, valid_data, args.batch_size, args.context_length, args.device, args.eval_iters, args.precision
             )
             metrics["valid/loss"] = valid_loss
             metrics["valid/perplexity"] = math.exp(min(valid_loss, 20))
@@ -274,7 +318,7 @@ def main() -> None:
 
         if args.checkpoint_path and (step % args.checkpoint_every == 0 or step == args.num_iters):
             args.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-            save_checkpoint(model, optimizer, step, args.checkpoint_path)
+            save_checkpoint(raw_model, optimizer, step, args.checkpoint_path)
             print(f"saved checkpoint to {args.checkpoint_path} at iteration {step}", flush=True)
 
     if writer is not None:

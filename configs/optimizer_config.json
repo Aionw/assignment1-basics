@@ -1,0 +1,11 @@
+{
+  "lr": 0.0003,
+  "min_lr": 0.00003,
+  "warmup_iters": 500,
+  "cosine_cycle_iters": 10000,
+  "weight_decay": 0.1,
+  "beta1": 0.9,
+  "beta2": 0.95,
+  "eps": 0.00000001,
+  "grad_clip": 1.0
+}

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -14,44 +16,142 @@ from cs336_basics.transformer import TransformerLM
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train a Transformer language model on token-id datasets.")
+    defaults = {
+        "data_dtype": "uint16",
+        "context_length": 256,
+        "d_model": 512,
+        "num_layers": 4,
+        "num_heads": 16,
+        "d_ff": 1344,
+        "rope_theta": 10_000.0,
+        "batch_size": 32,
+        "num_iters": 10_000,
+        "lr": 3e-4,
+        "min_lr": 3e-5,
+        "warmup_iters": 500,
+        "cosine_cycle_iters": None,
+        "weight_decay": 0.1,
+        "beta1": 0.9,
+        "beta2": 0.95,
+        "eps": 1e-8,
+        "grad_clip": 1.0,
+        "eval_iters": 20,
+        "log_every": 100,
+        "eval_every": 500,
+        "checkpoint_every": 1000,
+        "device": "cuda" if torch.cuda.is_available() else "cpu",
+        "seed": 1337,
+    }
+
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--model-config", type=Path, help="JSON file with model hyperparameters.")
+    config_parser.add_argument("--optimizer-config", type=Path, help="JSON file with optimizer hyperparameters.")
+    config_parser.add_argument("--training-config", type=Path, help="JSON file with training loop settings.")
+    config_args, remaining_args = config_parser.parse_known_args()
+    config_defaults = load_config_defaults(config_args)
+
+    parser = argparse.ArgumentParser(
+        description="Train a Transformer language model on token-id datasets.",
+        parents=[config_parser],
+    )
+    parser.set_defaults(**defaults)
+    parser.set_defaults(**config_defaults)
 
     parser.add_argument("--train-data", type=Path, required=True, help="Path to a 1D token-id dataset.")
     parser.add_argument("--valid-data", type=Path, help="Optional path to a 1D validation token-id dataset.")
-    parser.add_argument("--data-dtype", default="uint16", help="dtype for raw memmap files. Ignored for .npy files.")
+    parser.add_argument("--data-dtype", help="dtype for raw memmap files. Ignored for .npy files.")
 
-    parser.add_argument("--vocab-size", type=int, required=True)
-    parser.add_argument("--context-length", type=int, default=256)
-    parser.add_argument("--d-model", type=int, default=512)
-    parser.add_argument("--num-layers", type=int, default=4)
-    parser.add_argument("--num-heads", type=int, default=16)
-    parser.add_argument("--d-ff", type=int, default=1344)
-    parser.add_argument("--rope-theta", type=float, default=10_000.0)
+    parser.add_argument("--vocab-size", type=int)
+    parser.add_argument("--context-length", type=int)
+    parser.add_argument("--d-model", type=int)
+    parser.add_argument("--num-layers", type=int)
+    parser.add_argument("--num-heads", type=int)
+    parser.add_argument("--d-ff", type=int)
+    parser.add_argument("--rope-theta", type=float)
 
-    parser.add_argument("--batch-size", type=int, default=32)
-    parser.add_argument("--num-iters", type=int, default=10_000)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--min-lr", type=float, default=3e-5)
-    parser.add_argument("--warmup-iters", type=int, default=500)
+    parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--num-iters", type=int)
+    parser.add_argument("--lr", type=float)
+    parser.add_argument("--min-lr", type=float)
+    parser.add_argument("--warmup-iters", type=int)
     parser.add_argument("--cosine-cycle-iters", type=int)
-    parser.add_argument("--weight-decay", type=float, default=0.1)
-    parser.add_argument("--beta1", type=float, default=0.9)
-    parser.add_argument("--beta2", type=float, default=0.95)
-    parser.add_argument("--eps", type=float, default=1e-8)
-    parser.add_argument("--grad-clip", type=float, default=1.0)
+    parser.add_argument("--weight-decay", type=float)
+    parser.add_argument("--beta1", type=float)
+    parser.add_argument("--beta2", type=float)
+    parser.add_argument("--eps", type=float)
+    parser.add_argument("--grad-clip", type=float)
 
-    parser.add_argument("--eval-iters", type=int, default=20)
-    parser.add_argument("--log-every", type=int, default=100)
-    parser.add_argument("--eval-every", type=int, default=500)
-    parser.add_argument("--checkpoint-every", type=int, default=1000)
+    parser.add_argument("--eval-iters", type=int)
+    parser.add_argument("--log-every", type=int)
+    parser.add_argument("--eval-every", type=int)
+    parser.add_argument("--checkpoint-every", type=int)
     parser.add_argument("--checkpoint-path", type=Path, help="Where checkpoints should be written.")
     parser.add_argument("--resume-from", type=Path, help="Checkpoint path to resume from.")
 
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--seed", type=int, default=1337)
+    parser.add_argument("--device")
+    parser.add_argument("--seed", type=int)
     parser.add_argument("--tensorboard-log-dir", type=Path, help="If set, write metrics for TensorBoard.")
 
-    return parser.parse_args()
+    args = parser.parse_args(remaining_args)
+    if args.vocab_size is None:
+        parser.error("--vocab-size is required unless provided in --model-config")
+    return args
+
+
+def load_json_config(path: Path) -> dict[str, Any]:
+    with path.open() as f:
+        config = json.load(f)
+    if not isinstance(config, dict):
+        raise ValueError(f"{path} must contain a JSON object")
+    return config
+
+
+def load_config_defaults(config_args: argparse.Namespace) -> dict[str, Any]:
+    config_fields = {
+        "model_config": {
+            "vocab_size",
+            "context_length",
+            "d_model",
+            "num_layers",
+            "num_heads",
+            "d_ff",
+            "rope_theta",
+        },
+        "optimizer_config": {
+            "lr",
+            "min_lr",
+            "warmup_iters",
+            "cosine_cycle_iters",
+            "weight_decay",
+            "beta1",
+            "beta2",
+            "eps",
+            "grad_clip",
+        },
+        "training_config": {
+            "batch_size",
+            "num_iters",
+            "eval_iters",
+            "log_every",
+            "eval_every",
+            "checkpoint_every",
+            "data_dtype",
+            "device",
+            "seed",
+        },
+    }
+    defaults = {}
+    for attr, allowed_fields in config_fields.items():
+        path = getattr(config_args, attr)
+        if path is None:
+            continue
+        config = load_json_config(path)
+        unknown_fields = set(config) - allowed_fields
+        if unknown_fields:
+            fields = ", ".join(sorted(unknown_fields))
+            raise ValueError(f"{path} contains unsupported fields: {fields}")
+        defaults.update(config)
+    return defaults
 
 
 def load_token_array(path: Path, dtype: str) -> np.ndarray:

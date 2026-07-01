@@ -1,0 +1,11 @@
+{
+  "batch_size": 32,
+  "num_iters": 10000,
+  "eval_iters": 20,
+  "log_every": 100,
+  "eval_every": 500,
+  "checkpoint_every": 1000,
+  "data_dtype": "uint16",
+  "device": "cuda",
+  "seed": 1337
+}

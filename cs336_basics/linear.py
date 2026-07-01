@@ -32,9 +32,9 @@ def sliu(x: torch.Tensor) -> torch.Tensor:
 class SwiGLUFFN(nn.Module):
     def __init__(self, d_model: int, d_ff: int, device=None) -> None:
         super().__init__()
-        self.l1 = Linear(d_model, d_ff)
-        self.gate = Linear(d_model, d_ff)
-        self.l2 = Linear(d_ff, d_model)
+        self.l1 = Linear(d_model, d_ff, device=device)
+        self.gate = Linear(d_model, d_ff, device=device)
+        self.l2 = Linear(d_ff, d_model, device=device)
 
     def forward(self, x: Tensor) -> Tensor:
         return self.l2(silu(self.l1(x)) * self.gate(x))

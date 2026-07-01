@@ -69,7 +69,7 @@ class MultiHeadeSelfAttentionWithRoPE(nn.Module):
         K = self.wk(x).unflatten(-1, (self.num_heads, self.head_dim)).transpose(-2, -3)
         V = self.wv(x).unflatten(-1, (self.num_heads, self.head_dim)).transpose(-2, -3)
         # [..., num_head, seq_len, head_dim]
-        pos = positions if positions is not None else torch.arange(seq_len)
+        pos = positions if positions is not None else torch.arange(seq_len, device=x.device)
         Q = self.rope(Q, pos)
         K = self.rope(K, pos)
         mask = torch.ones(seq_len, seq_len, device=x.device, dtype=torch.bool).tril()

@@ -28,6 +28,8 @@ dependencies = [
 train-bpe = "cs336_basics.bpe_cli:main"
 train-lm = "cs336_basics.train_lm:main"
 run-lm = "cs336_basics.run_lm:main"
+bench-lm = "cs336_basics.bench_lm:main"
+bench-checkpoint = "cs336_basics.bench_checkpoint:main"
 
 [build-system]
 requires = ["scikit-build-core>=0.10", "nanobind>=2.12"]

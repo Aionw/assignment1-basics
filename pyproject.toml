@@ -7,6 +7,7 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "einops>=0.8",      # tensor operations
     "einx>=0.4",        # more general tensor operations
+    "fastapi-openai-compat>=1.2,<2",
     "jaxtyping>=0.3",   # type hints for pytorch/jax/numpy
     "numpy>=2.4",
     "psutil>=7",
@@ -18,6 +19,7 @@ dependencies = [
     "torch~=2.11.0",
     "tqdm>=4.67",
     "tensorboard>=2.20",
+    "uvicorn>=0.35",
     "ty>=0.0.26",
     "ruff>=0.15.8",
 ]
@@ -25,6 +27,7 @@ dependencies = [
 [project.scripts]
 train-bpe = "cs336_basics.bpe_cli:main"
 train-lm = "cs336_basics.train_lm:main"
+run-lm = "cs336_basics.run_lm:main"
 
 [build-system]
 requires = ["scikit-build-core>=0.10", "nanobind>=2.12"]
